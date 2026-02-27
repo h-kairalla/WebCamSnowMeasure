@@ -1,0 +1,27 @@
+services:
+  # Copy/paste this block for each camera and change:
+  # - service name
+  # - env_file
+  # - container_name
+  # - data bind mount target folder
+  snowcam-exm-cam1:
+    build: .
+    container_name: snowcam-exm-cam1
+    restart: unless-stopped
+    env_file:
+      - .env.camera.exm-cam1
+    volumes:
+      - ./data/exm-cam1:/app/data
+      # - ./secrets/adc.json:/app/secrets/adc.json:ro
+    command: ["python", "snow_reporter.py", "--interval-minutes", "30"]
+
+  snowcam-exm-cam2:
+    build: .
+    container_name: snowcam-exm-cam2
+    restart: unless-stopped
+    env_file:
+      - .env.camera.exm-cam2
+    volumes:
+      - ./data/exm-cam2:/app/data
+      # - ./secrets/adc.json:/app/secrets/adc.json:ro
+    command: ["python", "snow_reporter.py", "--interval-minutes", "30"]

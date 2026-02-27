@@ -17,8 +17,11 @@ Authored by Harrison Kairalla.
 - `snow_reporter.py`: main app
 - `Dockerfile`: container image
 - `docker-compose.yml`: runtime config
+- `docker-compose.cameras.yml`: multi-camera compose template
 - `sql/normalize_snowcam_prm.sql`: normalized schema + catalog metadata
+- `sql/add_camera.sql`: helper script to add/update resort/location/camera metadata
 - `.env.example`: environment template
+- `.env.camera.example`: per-camera env template
 
 ## Setup
 
@@ -58,6 +61,23 @@ GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/adc.json
 ```powershell
 docker compose run --rm snowcam-reporter python snow_reporter.py --once
 ```
+
+## Add New Cameras
+
+1. Add/activate camera metadata in SQL:
+
+```powershell
+sqlcmd -S <server> -d ExampleDB -U <user> -P <password> ^
+  -v RESORT_CODE=\"PRM\" RESORT_NAME=\"Example Resort\" TIMEZONE_NAME=\"America/Denver\" ^
+     LOCATION_CODE=\"SNOWSTAKE1\" LOCATION_NAME=\"Main Mountain Snow Stake\" ELEVATION_FT=\"0\" ^
+     CAMERA_CODE=\"EXM-CAM1\" CAMERA_NAME=\"example_snowstake1\" ^
+     IMAGE_URL=\"https://example.com/cam-images/example_snowstake1.jpg\" ^
+     POLL_INTERVAL_MINUTES=\"30\" ^
+  -i sql\\add_camera.sql
+```
+
+2. Create a per-camera env file from `.env.camera.example` (for example `.env.camera.exm-cam1`) and set `CAMERA_CODE`.
+3. Use `docker-compose.cameras.yml` to run one service per camera.
 
 ## Windows Server Checklist
 
