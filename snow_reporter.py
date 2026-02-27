@@ -220,7 +220,8 @@ def build_prompt() -> str:
     return (
         "You are analyzing a fixed snow stake webcam for a ski resort.\n"
         "Estimate snow depth on the stake in inches.\n"
-        "The numbered marks on the stake are inches.\n"
+        "The scale labels on the stake are inches.\n"
+        "This must work across different stake designs and backboards.\n"
         "Return depth rounded to the nearest 0.5 inch.\n"
         "Return JSON only with this exact schema:\n"
         "{"
@@ -231,10 +232,14 @@ def build_prompt() -> str:
         "}\n"
         "Rules:\n"
         "- confidence is 0 to 1\n"
-        "- current_depth_in is inches above the stake base (0-inch level)\n"
-        "- if the snow line is at or below the 0-inch level, return 0.0\n"
-        "- snow on nearby surfaces that is not touching the stake at the measurement point does not count\n"
-        "- shadows, wet pavement reflections, and dark water patches are not snow depth\n"
+        "- if the stake scale is unreadable or not visible enough to measure, set current_depth_in to -1.0\n"
+        "- current_depth_in is the snow level where snow intersects the stake scale\n"
+        "- use the local measurement reference surface at the stake base (platform/table/baseboard ground plane)\n"
+        "- if the stake base reference surface is visible/clear and snow at the stake is at or below zero, return 0.0\n"
+        "- do not use background snowbanks or terrain away from the stake\n"
+        "- only snow touching/intersecting the stake at the measurement point counts\n"
+        "- shadows, reflections, dark wet patches, logos, and painted graphics are not snow depth\n"
+        "- if notes indicate clear base/no accumulation at stake, current_depth_in must be 0.0\n"
         "- when uncertain, choose the lower depth estimate\n"
         "- be conservative when visibility is poor\n"
         "- notes must be concise and <= 180 characters\n"
@@ -247,8 +252,11 @@ def parse_model_json(raw_text: str) -> Dict[str, Any]:
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"Model did not return JSON object: {raw_text}")
     obj = json.loads(raw_text[start : end + 1])
+    depth = float(obj["current_depth_in"])
+    if depth < 0 and depth != -1.0:
+        depth = -1.0
     return {
-        "current_depth_in": float(obj["current_depth_in"]),
+        "current_depth_in": depth,
         "confidence": float(obj.get("confidence", 0.0)),
         "visibility": str(obj.get("visibility", "unknown")),
         "notes": str(obj.get("notes", "")),
@@ -308,7 +316,12 @@ def compute_interval_snowfall(
     min_increment_in: float,
     clear_drop_threshold_in: float,
 ) -> Dict[str, Any]:
+    # Sentinel -1.0 means unreadable stake; skip accumulation math for that interval.
+    if current_depth_in < 0:
+        return {"interval_snowfall_in": 0.0, "stake_cleared": False, "delta_in": 0.0}
     if previous_depth_in is None:
+        return {"interval_snowfall_in": 0.0, "stake_cleared": False, "delta_in": 0.0}
+    if previous_depth_in < 0:
         return {"interval_snowfall_in": 0.0, "stake_cleared": False, "delta_in": 0.0}
 
     delta = current_depth_in - previous_depth_in
@@ -485,6 +498,8 @@ def should_insert_success(cfg: Config, report: Dict[str, Any], last_db_row: Opti
     last_obs = last_db_row.get("observation_utc")
     if isinstance(last_obs, datetime):
         now_dt = utc_iso_to_datetime(report["timestamp_utc"])
+        if last_obs.tzinfo is None:
+            last_obs = last_obs.replace(tzinfo=timezone.utc)
         if now_dt - last_obs >= timedelta(hours=cfg.heartbeat_hours):
             return True
     return False
