@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pyodbc
@@ -28,7 +28,6 @@ class Config:
     model: str
     use_vertex_ai: bool
     timezone_name: str
-    interval_minutes: int
     min_increment_in: float
     clear_drop_threshold_in: float
     use_mock_analyzer: bool
@@ -36,7 +35,6 @@ class Config:
     fetch_retry_attempts: int
     vertex_retry_attempts: int
     retry_delay_seconds: int
-    camera_code: str
     db_enabled: bool
     db_driver: str
     db_server: str
@@ -110,7 +108,6 @@ def load_config(args: argparse.Namespace) -> Config:
         model=os.getenv("VERTEX_MODEL", "gemini-2.5-pro"),
         use_vertex_ai=os.getenv("USE_VERTEX_AI", "true").lower() == "true",
         timezone_name=os.getenv("RESORT_TIMEZONE", "America/Denver"),
-        interval_minutes=args.interval_minutes,
         min_increment_in=float(os.getenv("SNOW_MIN_INCREMENT_IN", "0.1")),
         clear_drop_threshold_in=float(os.getenv("SNOW_CLEAR_DROP_IN", "2.0")),
         use_mock_analyzer=os.getenv("SNOW_USE_MOCK_ANALYZER", "false").lower() == "true",
@@ -118,7 +115,6 @@ def load_config(args: argparse.Namespace) -> Config:
         fetch_retry_attempts=int(os.getenv("FETCH_RETRY_ATTEMPTS", "2")),
         vertex_retry_attempts=int(os.getenv("VERTEX_RETRY_ATTEMPTS", "2")),
         retry_delay_seconds=int(os.getenv("RETRY_DELAY_SECONDS", "3")),
-        camera_code=os.getenv("CAMERA_CODE", "EXM-CAM1"),
         db_enabled=os.getenv("DB_ENABLED", "true").lower() == "true",
         db_driver=os.getenv("DB_DRIVER", "ODBC Driver 18 for SQL Server"),
         db_server=os.getenv("DB_SERVER", ""),
@@ -144,18 +140,33 @@ def load_config(args: argparse.Namespace) -> Config:
 
 def ensure_data_paths(data_dir: Path) -> Dict[str, Path]:
     logs_dir = data_dir / "logs"
-    daily_summary_dir = data_dir / "daily_summaries"
+    cameras_dir = data_dir / "cameras"
     data_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    daily_summary_dir.mkdir(parents=True, exist_ok=True)
+    cameras_dir.mkdir(parents=True, exist_ok=True)
     return {
-        "history": data_dir / "history.json",
-        "last_image": data_dir / "last_image.jpg",
-        "latest_report": data_dir / "latest_report.json",
         "log_file": logs_dir / "snow_reporter.log",
         "lock_file": data_dir / "snow_reporter.lock",
-        "daily_summary_dir": daily_summary_dir,
+        "cameras_dir": cameras_dir,
         "email_state": data_dir / "email_state.json",
+    }
+
+
+def camera_code_to_dirname(camera_code: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in camera_code.strip())
+    return safe.lower() or "unknown_camera"
+
+
+def ensure_camera_paths(base_paths: Dict[str, Path], camera_code: str) -> Dict[str, Path]:
+    camera_dir = base_paths["cameras_dir"] / camera_code_to_dirname(camera_code)
+    daily_summary_dir = camera_dir / "daily_summaries"
+    camera_dir.mkdir(parents=True, exist_ok=True)
+    daily_summary_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "history": camera_dir / "history.json",
+        "last_image": camera_dir / "last_image.jpg",
+        "latest_report": camera_dir / "latest_report.json",
+        "daily_summary_dir": daily_summary_dir,
     }
 
 
@@ -263,8 +274,23 @@ def parse_model_json(raw_text: str) -> Dict[str, Any]:
     }
 
 
+def build_genai_client(cfg: Config) -> genai.Client:
+    if cfg.use_vertex_ai:
+        if not cfg.project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT is required when USE_VERTEX_AI=true.")
+        return genai.Client(vertexai=True, project=cfg.project_id, location=cfg.location)
+    else:
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is required when USE_VERTEX_AI=false.")
+        return genai.Client(api_key=api_key)
+
+
 def analyze_with_vertex(
-    cfg: Config, current_image: bytes, previous_image: Optional[bytes]
+    cfg: Config,
+    current_image: bytes,
+    previous_image: Optional[bytes],
+    client: Optional[genai.Client] = None,
 ) -> Dict[str, Any]:
     if cfg.use_mock_analyzer:
         return {
@@ -274,15 +300,8 @@ def analyze_with_vertex(
             "notes": "Mock analyzer enabled.",
         }
 
-    if cfg.use_vertex_ai:
-        if not cfg.project_id:
-            raise ValueError("GOOGLE_CLOUD_PROJECT is required when USE_VERTEX_AI=true.")
-        client = genai.Client(vertexai=True, project=cfg.project_id, location=cfg.location)
-    else:
-        api_key = os.getenv("GEMINI_API_KEY", "")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY is required when USE_VERTEX_AI=false.")
-        client = genai.Client(api_key=api_key)
+    if client is None:
+        client = build_genai_client(cfg)
 
     parts = [types.Part.from_text(text=build_prompt())]
 
@@ -413,7 +432,7 @@ def check_db_schema(cfg: Config, logger: logging.Logger) -> bool:
         return False
 
 
-def resolve_camera_context(cfg: Config) -> Dict[str, Any]:
+def load_active_camera_contexts(cfg: Config) -> List[Dict[str, Any]]:
     with get_db_connection(cfg) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -430,25 +449,27 @@ def resolve_camera_context(cfg: Config) -> Dict[str, Any]:
             FROM dbo.dim_camera c
             JOIN dbo.dim_location l ON c.location_id = l.location_id
             JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
-            WHERE c.camera_code = ?
-            """,
-            cfg.camera_code,
+            WHERE c.is_active = 1
+            ORDER BY c.camera_id ASC
+            """
         )
-        # CAMERA_CODE is the only runtime identity key; all names come from DB dimensions.
-        row = cur.fetchone()
-        if not row:
-            raise RuntimeError(f"CAMERA_CODE '{cfg.camera_code}' was not found in dbo.dim_camera.")
-        if not bool(row[4]):
-            raise RuntimeError(f"CAMERA_CODE '{cfg.camera_code}' is inactive in dbo.dim_camera.")
-        return {
-            "camera_id": int(row[0]),
-            "camera_name": str(row[1]),
-            "camera_code": str(row[2]),
-            "image_url": str(row[3]),
-            "location_name": str(row[5]),
-            "resort_name": str(row[6]),
-            "timezone_name": str(row[7]) if row[7] else cfg.timezone_name,
-        }
+        rows = cur.fetchall()
+        if not rows:
+            raise RuntimeError("No active cameras found in dbo.dim_camera.")
+        cameras: List[Dict[str, Any]] = []
+        for row in rows:
+            cameras.append(
+                {
+                    "camera_id": int(row[0]),
+                    "camera_name": str(row[1]),
+                    "camera_code": str(row[2]),
+                    "image_url": str(row[3]),
+                    "location_name": str(row[5]),
+                    "resort_name": str(row[6]),
+                    "timezone_name": str(row[7]) if row[7] else cfg.timezone_name,
+                }
+            )
+        return cameras
 
 
 def get_last_db_row(cfg: Config, camera_id: int) -> Optional[Dict[str, Any]]:
@@ -682,28 +703,25 @@ def maybe_send_error_email(
     return "sent"
 
 
-def run_once(
+def run_once_camera(
     cfg: Config,
-    paths: Dict[str, Path],
+    camera_paths: Dict[str, Path],
     logger: logging.Logger,
     camera_ctx: Dict[str, Any],
+    current_image: bytes,
+    analysis_client: Optional[genai.Client],
 ) -> Dict[str, Any]:
-    history = load_history(paths["history"])
+    history = load_history(camera_paths["history"])
     previous_depth = float(history[-1]["current_depth_in"]) if history else None
-    previous_image = paths["last_image"].read_bytes() if paths["last_image"].exists() else None
-
-    current_image = with_retry(
-        "image_fetch",
-        cfg.fetch_retry_attempts,
-        cfg.retry_delay_seconds,
-        lambda: fetch_image(camera_ctx["image_url"], cfg.image_verify_tls),
-        logger,
+    previous_image = (
+        camera_paths["last_image"].read_bytes() if camera_paths["last_image"].exists() else None
     )
+
     model_result = with_retry(
         "vertex_analysis",
         cfg.vertex_retry_attempts,
         cfg.retry_delay_seconds,
-        lambda: analyze_with_vertex(cfg, current_image, previous_image),
+        lambda: analyze_with_vertex(cfg, current_image, previous_image, analysis_client),
         logger,
     )
 
@@ -732,16 +750,23 @@ def run_once(
     }
 
     history.append(row)
-    save_history(paths["history"], history)
-    paths["last_image"].write_bytes(current_image)
+    save_history(camera_paths["history"], history)
+    camera_paths["last_image"].write_bytes(current_image)
 
     today_total = total_for_date(history, local_today.isoformat(), report_timezone)
     yesterday_total = total_for_date(history, local_yesterday.isoformat(), report_timezone)
 
-    write_daily_checkpoint(history, report_timezone, paths, local_today, local_yesterday, timestamp)
+    write_daily_checkpoint(
+        history, report_timezone, camera_paths, local_today, local_yesterday, timestamp
+    )
 
     report = {
         "timestamp_utc": timestamp,
+        "camera_code": camera_ctx["camera_code"],
+        "camera_id": camera_ctx["camera_id"],
+        "camera_name": camera_ctx["camera_name"],
+        "resort_name": camera_ctx["resort_name"],
+        "location_name": camera_ctx["location_name"],
         "resort_timezone": report_timezone,
         "current_depth_in": row["current_depth_in"],
         "delta_in": row["delta_in"],
@@ -755,19 +780,12 @@ def run_once(
         "run_status": "success",
         "error_message": None,
     }
-    paths["latest_report"].write_text(json.dumps(report, indent=2), encoding="utf-8")
+    camera_paths["latest_report"].write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Snow stake reporter using Vertex AI.")
-    parser.add_argument("--once", action="store_true", help="Run one cycle and exit.")
-    parser.add_argument(
-        "--interval-minutes",
-        type=int,
-        default=30,
-        help="Polling interval in minutes for loop mode.",
-    )
     parser.add_argument(
         "--data-dir",
         default="data",
@@ -778,16 +796,60 @@ def parse_args() -> argparse.Namespace:
 
 def run_cycle(
     cfg: Config,
-    paths: Dict[str, Path],
+    base_paths: Dict[str, Path],
     logger: logging.Logger,
     db_schema_ready: bool,
-    camera_ctx: Dict[str, Any],
+    camera_contexts: List[Dict[str, Any]],
 ) -> None:
-    try:
-        report = run_once(cfg, paths, logger, camera_ctx)
+    # Phase 1: fetch all camera images.
+    fetched_images: Dict[int, bytes] = {}
+    phase_errors: List[Tuple[Dict[str, Any], str, str]] = []
+    for camera_ctx in camera_contexts:
+        try:
+            current_image = with_retry(
+                f"image_fetch:{camera_ctx['camera_code']}",
+                cfg.fetch_retry_attempts,
+                cfg.retry_delay_seconds,
+                lambda url=camera_ctx["image_url"]: fetch_image(url, cfg.image_verify_tls),
+                logger,
+            )
+            fetched_images[camera_ctx["camera_id"]] = current_image
+        except Exception as exc:
+            phase_errors.append((camera_ctx, now_utc_iso(), f"image_fetch_failed: {exc}"))
+
+    # Phase 2: run all model calls.
+    success_reports: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    analysis_client: Optional[genai.Client] = None
+    if not cfg.use_mock_analyzer:
+        try:
+            analysis_client = build_genai_client(cfg)
+        except Exception as exc:
+            for camera_ctx in camera_contexts:
+                if camera_ctx["camera_id"] in fetched_images:
+                    phase_errors.append((camera_ctx, now_utc_iso(), f"vertex_client_failed: {exc}"))
+            fetched_images.clear()
+
+    for camera_ctx in camera_contexts:
+        if camera_ctx["camera_id"] not in fetched_images:
+            continue
+        camera_paths = ensure_camera_paths(base_paths, camera_ctx["camera_code"])
+        try:
+            report = run_once_camera(
+                cfg=cfg,
+                camera_paths=camera_paths,
+                logger=logger,
+                camera_ctx=camera_ctx,
+                current_image=fetched_images[camera_ctx["camera_id"]],
+                analysis_client=analysis_client,
+            )
+            success_reports.append((camera_ctx, report))
+        except Exception as exc:
+            phase_errors.append((camera_ctx, now_utc_iso(), f"analysis_failed: {exc}"))
+
+    # Phase 3: write DB and emit logs/emails.
+    for camera_ctx, report in success_reports:
         db_status = maybe_log_report_to_db(cfg, report, db_schema_ready, camera_ctx)
         report["db_log_status"] = db_status
-
         msg = json.dumps(report, indent=2)
         print(msg)
         logger.info(msg)
@@ -795,17 +857,18 @@ def run_cycle(
         if db_status.startswith("db_error"):
             email_status = maybe_send_error_email(
                 cfg,
-                paths,
-                "Database logging failure",
-                f"Timestamp: {report['timestamp_utc']}\n\n{db_status}",
+                base_paths,
+                f"Database logging failure ({camera_ctx['camera_code']})",
+                f"Camera: {camera_ctx['camera_code']}\nTimestamp: {report['timestamp_utc']}\n\n{db_status}",
                 report["timestamp_utc"],
             )
             logger.warning("Error email status: %s", email_status)
-    except Exception as exc:
-        timestamp = now_utc_iso()
-        db_status = log_error_to_db(cfg, timestamp, str(exc), db_schema_ready, camera_ctx)
+
+    for camera_ctx, timestamp, error_message in phase_errors:
+        db_status = log_error_to_db(cfg, timestamp, error_message, db_schema_ready, camera_ctx)
         payload = {
-            "error": str(exc),
+            "camera_code": camera_ctx["camera_code"],
+            "error": error_message,
             "timestamp_utc": timestamp,
             "db_log_status": db_status,
         }
@@ -815,9 +878,9 @@ def run_cycle(
 
         email_status = maybe_send_error_email(
             cfg,
-            paths,
-            "Snow reporter run failed",
-            f"Timestamp: {timestamp}\n\nError: {exc}\n\nDB status: {db_status}",
+            base_paths,
+            f"Snow reporter run failed ({camera_ctx['camera_code']})",
+            f"Camera: {camera_ctx['camera_code']}\nTimestamp: {timestamp}\n\nError: {error_message}\n\nDB status: {db_status}",
             timestamp,
         )
         logger.warning("Error email status: %s", email_status)
@@ -833,20 +896,19 @@ def main() -> None:
     paths = ensure_data_paths(cfg.data_dir)
     logger = setup_logger(paths["log_file"])
 
+    if not cfg.db_enabled:
+        raise RuntimeError("DB_ENABLED=true is required. Multi-camera mode is DB-driven.")
+
     db_schema_ready = check_db_schema(cfg, logger)
-    camera_ctx: Dict[str, Any] = {
-        "camera_id": -1,
-        "camera_name": "unknown",
-        "camera_code": cfg.camera_code,
-        "image_url": cfg.image_url,
-        "location_name": "unknown",
-        "resort_name": "unknown",
-        "timezone_name": cfg.timezone_name,
-    }
-    if cfg.db_enabled:
-        camera_ctx = resolve_camera_context(cfg)
+    if not db_schema_ready:
+        raise RuntimeError(
+            "Required DB schema is missing. Run sql/normalize_snowcam_prm.sql before starting."
+        )
+    camera_contexts = load_active_camera_contexts(cfg)
+    logger.info("Loaded %s active camera(s) from dbo.dim_camera.", len(camera_contexts))
+    for camera_ctx in camera_contexts:
         logger.info(
-            "Resolved camera_code=%s to camera_id=%s (%s / %s / %s)",
+            "Camera %s => id=%s (%s / %s / %s)",
             camera_ctx["camera_code"],
             camera_ctx["camera_id"],
             camera_ctx["resort_name"],
@@ -856,13 +918,7 @@ def main() -> None:
 
     try:
         with FileLock(paths["lock_file"], cfg.lock_stale_minutes):
-            if args.once:
-                run_cycle(cfg, paths, logger, db_schema_ready, camera_ctx)
-                return
-
-            while True:
-                run_cycle(cfg, paths, logger, db_schema_ready, camera_ctx)
-                time.sleep(cfg.interval_minutes * 60)
+            run_cycle(cfg, paths, logger, db_schema_ready, camera_contexts)
     except RuntimeError as exc:
         payload = {"error": str(exc), "timestamp_utc": now_utc_iso(), "run_status": "skipped"}
         msg = json.dumps(payload, indent=2)

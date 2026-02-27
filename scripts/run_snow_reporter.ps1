@@ -3,12 +3,5 @@ param(
 )
 
 Set-Location $ProjectDir
-
-$pythonExe = Join-Path $ProjectDir ".venv\Scripts\python.exe"
-if (-not (Test-Path $pythonExe)) {
-    Write-Error "Python venv executable not found: $pythonExe"
-    exit 1
-}
-
-& $pythonExe "snow_reporter.py" --once
+docker compose run --rm snowcam-reporter python snow_reporter.py
 exit $LASTEXITCODE

@@ -2,7 +2,7 @@ services:
   snowcam-reporter:
     build: .
     container_name: snowcam-reporter
-    restart: unless-stopped
+    restart: "no"
     env_file:
       - .env
     volumes:
@@ -10,4 +10,4 @@ services:
       # If using file-based ADC inside container, mount JSON key and set
       # GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/adc.json in .env
       # - ./secrets/adc.json:/app/secrets/adc.json:ro
-    command: ["python", "snow_reporter.py", "--interval-minutes", "30"]
+    command: ["python", "snow_reporter.py"]
