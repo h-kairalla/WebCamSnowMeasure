@@ -30,6 +30,9 @@ class Config:
     timezone_name: str
     min_increment_in: float
     clear_drop_threshold_in: float
+    min_confidence_for_increment: float
+    require_good_visibility_for_increment: bool
+    max_increment_in: float
     use_mock_analyzer: bool
     image_verify_tls: bool
     fetch_retry_attempts: int
@@ -110,6 +113,12 @@ def load_config(args: argparse.Namespace) -> Config:
         timezone_name=os.getenv("RESORT_TIMEZONE", "America/Denver"),
         min_increment_in=float(os.getenv("SNOW_MIN_INCREMENT_IN", "0.1")),
         clear_drop_threshold_in=float(os.getenv("SNOW_CLEAR_DROP_IN", "2.0")),
+        min_confidence_for_increment=float(os.getenv("SNOW_MIN_CONFIDENCE_FOR_INCREMENT", "0.85")),
+        require_good_visibility_for_increment=os.getenv(
+            "SNOW_REQUIRE_GOOD_VISIBILITY_FOR_INCREMENT", "true"
+        ).lower()
+        == "true",
+        max_increment_in=float(os.getenv("SNOW_MAX_INCREMENT_IN", "3.0")),
         use_mock_analyzer=os.getenv("SNOW_USE_MOCK_ANALYZER", "false").lower() == "true",
         image_verify_tls=os.getenv("SNOW_IMAGE_VERIFY_TLS", "true").lower() == "true",
         fetch_retry_attempts=int(os.getenv("FETCH_RETRY_ATTEMPTS", "2")),
@@ -334,6 +343,11 @@ def compute_interval_snowfall(
     previous_depth_in: Optional[float],
     min_increment_in: float,
     clear_drop_threshold_in: float,
+    confidence: float,
+    visibility: str,
+    min_confidence_for_increment: float,
+    require_good_visibility_for_increment: bool,
+    max_increment_in: float,
 ) -> Dict[str, Any]:
     # Sentinel -1.0 means unreadable stake; skip accumulation math for that interval.
     if current_depth_in < 0:
@@ -345,10 +359,42 @@ def compute_interval_snowfall(
 
     delta = current_depth_in - previous_depth_in
     if delta <= -clear_drop_threshold_in:
-        return {"interval_snowfall_in": 0.0, "stake_cleared": True, "delta_in": delta}
+        return {
+            "interval_snowfall_in": 0.0,
+            "stake_cleared": True,
+            "delta_in": delta,
+            "suppressed_reason": "",
+        }
     if delta >= min_increment_in:
-        return {"interval_snowfall_in": round(delta, 2), "stake_cleared": False, "delta_in": delta}
-    return {"interval_snowfall_in": 0.0, "stake_cleared": False, "delta_in": delta}
+        # Guardrails to avoid false positives from low-light/noisy frames.
+        if delta > max_increment_in:
+            return {
+                "interval_snowfall_in": 0.0,
+                "stake_cleared": False,
+                "delta_in": delta,
+                "suppressed_reason": "delta_exceeds_max_increment",
+            }
+        if require_good_visibility_for_increment and visibility != "good":
+            return {
+                "interval_snowfall_in": 0.0,
+                "stake_cleared": False,
+                "delta_in": delta,
+                "suppressed_reason": "visibility_not_good",
+            }
+        if confidence < min_confidence_for_increment:
+            return {
+                "interval_snowfall_in": 0.0,
+                "stake_cleared": False,
+                "delta_in": delta,
+                "suppressed_reason": "confidence_below_threshold",
+            }
+        return {
+            "interval_snowfall_in": round(delta, 2),
+            "stake_cleared": False,
+            "delta_in": delta,
+            "suppressed_reason": "",
+        }
+    return {"interval_snowfall_in": 0.0, "stake_cleared": False, "delta_in": delta, "suppressed_reason": ""}
 
 
 def get_timezone(timezone_name: str) -> timezone:
@@ -730,7 +776,21 @@ def run_once_camera(
         previous_depth_in=previous_depth,
         min_increment_in=cfg.min_increment_in,
         clear_drop_threshold_in=cfg.clear_drop_threshold_in,
+        confidence=model_result["confidence"],
+        visibility=model_result["visibility"],
+        min_confidence_for_increment=cfg.min_confidence_for_increment,
+        require_good_visibility_for_increment=cfg.require_good_visibility_for_increment,
+        max_increment_in=cfg.max_increment_in,
     )
+    if metrics.get("suppressed_reason"):
+        logger.warning(
+            "Suppressed snowfall increment for %s (%s): delta=%.2f confidence=%.2f visibility=%s",
+            camera_ctx["camera_code"],
+            metrics["suppressed_reason"],
+            float(metrics["delta_in"]),
+            float(model_result["confidence"]),
+            model_result["visibility"],
+        )
 
     timestamp = now_utc_iso()
     report_timezone = camera_ctx.get("timezone_name", cfg.timezone_name)
