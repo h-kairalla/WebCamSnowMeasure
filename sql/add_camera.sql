@@ -9,6 +9,7 @@ sqlcmd -S <server> -d ExampleDB -U <user> -P <password> ^
      CAMERA_CODE="EXM-CAM1" CAMERA_NAME="example_snowstake1" ^
      IMAGE_URL="https://example.com/cam-images/example_snowstake1.jpg" ^
      POLL_INTERVAL_MINUTES="30" ^
+     CROP_X="" CROP_Y="" CROP_W="" CROP_H="" ^
   -i sql\add_camera.sql
 */
 
@@ -22,6 +23,10 @@ DECLARE @camera_name NVARCHAR(100) = N'$(CAMERA_NAME)';
 DECLARE @image_url NVARCHAR(500) = N'$(IMAGE_URL)';
 DECLARE @poll_interval_minutes INT = TRY_CAST('$(POLL_INTERVAL_MINUTES)' AS INT);
 DECLARE @elevation_ft INT = TRY_CAST('$(ELEVATION_FT)' AS INT);
+DECLARE @crop_x INT = TRY_CAST(NULLIF('$(CROP_X)', '') AS INT);
+DECLARE @crop_y INT = TRY_CAST(NULLIF('$(CROP_Y)', '') AS INT);
+DECLARE @crop_w INT = TRY_CAST(NULLIF('$(CROP_W)', '') AS INT);
+DECLARE @crop_h INT = TRY_CAST(NULLIF('$(CROP_H)', '') AS INT);
 
 IF @poll_interval_minutes IS NULL
     SET @poll_interval_minutes = 30;
@@ -83,49 +88,129 @@ BEGIN
     WHERE location_id = @location_id;
 END;
 
+DECLARE @has_crop_columns BIT = CASE
+    WHEN COL_LENGTH('dbo.dim_camera', 'crop_x') IS NOT NULL
+      AND COL_LENGTH('dbo.dim_camera', 'crop_y') IS NOT NULL
+      AND COL_LENGTH('dbo.dim_camera', 'crop_w') IS NOT NULL
+      AND COL_LENGTH('dbo.dim_camera', 'crop_h') IS NOT NULL
+    THEN 1 ELSE 0 END;
+
 IF NOT EXISTS (SELECT 1 FROM dbo.dim_camera WHERE camera_code = @camera_code)
 BEGIN
-    INSERT INTO dbo.dim_camera
-    (
-        location_id,
-        camera_code,
-        camera_name,
-        image_url,
-        poll_interval_minutes,
-        is_active
-    )
-    VALUES
-    (
-        @location_id,
-        @camera_code,
-        @camera_name,
-        @image_url,
-        @poll_interval_minutes,
-        1
-    );
+    IF @has_crop_columns = 1
+    BEGIN
+        INSERT INTO dbo.dim_camera
+        (
+            location_id,
+            camera_code,
+            camera_name,
+            image_url,
+            poll_interval_minutes,
+            crop_x,
+            crop_y,
+            crop_w,
+            crop_h,
+            is_active
+        )
+        VALUES
+        (
+            @location_id,
+            @camera_code,
+            @camera_name,
+            @image_url,
+            @poll_interval_minutes,
+            @crop_x,
+            @crop_y,
+            @crop_w,
+            @crop_h,
+            1
+        );
+    END
+    ELSE
+    BEGIN
+        INSERT INTO dbo.dim_camera
+        (
+            location_id,
+            camera_code,
+            camera_name,
+            image_url,
+            poll_interval_minutes,
+            is_active
+        )
+        VALUES
+        (
+            @location_id,
+            @camera_code,
+            @camera_name,
+            @image_url,
+            @poll_interval_minutes,
+            1
+        );
+    END
 END
 ELSE
 BEGIN
-    UPDATE dbo.dim_camera
-    SET location_id = @location_id,
-        camera_name = @camera_name,
-        image_url = @image_url,
-        poll_interval_minutes = @poll_interval_minutes,
-        is_active = 1
-    WHERE camera_code = @camera_code;
+    IF @has_crop_columns = 1
+    BEGIN
+        UPDATE dbo.dim_camera
+        SET location_id = @location_id,
+            camera_name = @camera_name,
+            image_url = @image_url,
+            poll_interval_minutes = @poll_interval_minutes,
+            crop_x = @crop_x,
+            crop_y = @crop_y,
+            crop_w = @crop_w,
+            crop_h = @crop_h,
+            is_active = 1
+        WHERE camera_code = @camera_code;
+    END
+    ELSE
+    BEGIN
+        UPDATE dbo.dim_camera
+        SET location_id = @location_id,
+            camera_name = @camera_name,
+            image_url = @image_url,
+            poll_interval_minutes = @poll_interval_minutes,
+            is_active = 1
+        WHERE camera_code = @camera_code;
+    END
 END;
 
-SELECT
-    r.resort_code,
-    r.resort_name,
-    l.location_code,
-    l.location_name,
-    c.camera_code,
-    c.camera_name,
-    c.image_url,
-    c.poll_interval_minutes,
-    c.is_active
-FROM dbo.dim_camera c
-JOIN dbo.dim_location l ON c.location_id = l.location_id
-JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
-WHERE c.camera_code = @camera_code;
+IF @has_crop_columns = 1
+BEGIN
+    SELECT
+        r.resort_code,
+        r.resort_name,
+        l.location_code,
+        l.location_name,
+        c.camera_code,
+        c.camera_name,
+        c.image_url,
+        c.poll_interval_minutes,
+        c.crop_x,
+        c.crop_y,
+        c.crop_w,
+        c.crop_h,
+        c.is_active
+    FROM dbo.dim_camera c
+    JOIN dbo.dim_location l ON c.location_id = l.location_id
+    JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+    WHERE c.camera_code = @camera_code;
+END
+ELSE
+BEGIN
+    SELECT
+        r.resort_code,
+        r.resort_name,
+        l.location_code,
+        l.location_name,
+        c.camera_code,
+        c.camera_name,
+        c.image_url,
+        c.poll_interval_minutes,
+        c.is_active
+    FROM dbo.dim_camera c
+    JOIN dbo.dim_location l ON c.location_id = l.location_id
+    JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+    WHERE c.camera_code = @camera_code;
+END

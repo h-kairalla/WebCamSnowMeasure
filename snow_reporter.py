@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.auth.exceptions import DefaultCredentialsError
 from google.genai import types
+from PIL import Image
 
 
 @dataclass
@@ -484,21 +486,56 @@ def load_active_camera_contexts(cfg: Config) -> List[Dict[str, Any]]:
         cur.execute(
             """
             SELECT
-                c.camera_id,
-                c.camera_name,
-                c.camera_code,
-                c.image_url,
-                c.is_active,
-                l.location_name,
-                r.resort_name,
-                r.timezone_name
-            FROM dbo.dim_camera c
-            JOIN dbo.dim_location l ON c.location_id = l.location_id
-            JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
-            WHERE c.is_active = 1
-            ORDER BY c.camera_id ASC
+                CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_x') IS NOT NULL THEN 1 ELSE 0 END,
+                CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_y') IS NOT NULL THEN 1 ELSE 0 END,
+                CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_w') IS NOT NULL THEN 1 ELSE 0 END,
+                CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_h') IS NOT NULL THEN 1 ELSE 0 END
             """
         )
+        crop_columns_present = all(bool(v) for v in cur.fetchone())
+
+        if crop_columns_present:
+            cur.execute(
+                """
+                SELECT
+                    c.camera_id,
+                    c.camera_name,
+                    c.camera_code,
+                    c.image_url,
+                    c.is_active,
+                    l.location_name,
+                    r.resort_name,
+                    r.timezone_name,
+                    c.crop_x,
+                    c.crop_y,
+                    c.crop_w,
+                    c.crop_h
+                FROM dbo.dim_camera c
+                JOIN dbo.dim_location l ON c.location_id = l.location_id
+                JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+                WHERE c.is_active = 1
+                ORDER BY c.camera_id ASC
+                """
+            )
+        else:
+            cur.execute(
+                """
+                SELECT
+                    c.camera_id,
+                    c.camera_name,
+                    c.camera_code,
+                    c.image_url,
+                    c.is_active,
+                    l.location_name,
+                    r.resort_name,
+                    r.timezone_name
+                FROM dbo.dim_camera c
+                JOIN dbo.dim_location l ON c.location_id = l.location_id
+                JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+                WHERE c.is_active = 1
+                ORDER BY c.camera_id ASC
+                """
+            )
         rows = cur.fetchall()
         if not rows:
             raise RuntimeError("No active cameras found in dbo.dim_camera.")
@@ -513,9 +550,55 @@ def load_active_camera_contexts(cfg: Config) -> List[Dict[str, Any]]:
                     "location_name": str(row[5]),
                     "resort_name": str(row[6]),
                     "timezone_name": str(row[7]) if row[7] else cfg.timezone_name,
+                    "crop_x": int(row[8]) if crop_columns_present and row[8] is not None else None,
+                    "crop_y": int(row[9]) if crop_columns_present and row[9] is not None else None,
+                    "crop_w": int(row[10]) if crop_columns_present and row[10] is not None else None,
+                    "crop_h": int(row[11]) if crop_columns_present and row[11] is not None else None,
                 }
             )
         return cameras
+
+
+def maybe_crop_image_for_camera(
+    image_bytes: bytes, camera_ctx: Dict[str, Any], logger: logging.Logger
+) -> bytes:
+    crop_x = camera_ctx.get("crop_x")
+    crop_y = camera_ctx.get("crop_y")
+    crop_w = camera_ctx.get("crop_w")
+    crop_h = camera_ctx.get("crop_h")
+    if None in (crop_x, crop_y, crop_w, crop_h):
+        return image_bytes
+    if crop_w <= 0 or crop_h <= 0:
+        logger.warning(
+            "Invalid crop dimensions for %s. Using full image.",
+            camera_ctx["camera_code"],
+        )
+        return image_bytes
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            width, height = img.size
+            left = max(0, int(crop_x))
+            top = max(0, int(crop_y))
+            right = min(width, left + int(crop_w))
+            bottom = min(height, top + int(crop_h))
+            if right <= left or bottom <= top:
+                logger.warning(
+                    "Crop rectangle out of bounds for %s. Using full image.",
+                    camera_ctx["camera_code"],
+                )
+                return image_bytes
+            cropped = img.crop((left, top, right, bottom))
+            out = io.BytesIO()
+            cropped.save(out, format="JPEG", quality=95)
+            return out.getvalue()
+    except Exception as exc:
+        logger.warning(
+            "Failed to crop image for %s: %s. Using full image.",
+            camera_ctx["camera_code"],
+            exc,
+        )
+        return image_bytes
 
 
 def get_last_db_row(cfg: Config, camera_id: int) -> Optional[Dict[str, Any]]:
@@ -899,7 +982,9 @@ def run_cycle(
                 camera_paths=camera_paths,
                 logger=logger,
                 camera_ctx=camera_ctx,
-                current_image=fetched_images[camera_ctx["camera_id"]],
+                current_image=maybe_crop_image_for_camera(
+                    fetched_images[camera_ctx["camera_id"]], camera_ctx, logger
+                ),
                 analysis_client=analysis_client,
             )
             success_reports.append((camera_ctx, report))
