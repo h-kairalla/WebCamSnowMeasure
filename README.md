@@ -19,6 +19,10 @@ Authored by Harrison Kairalla.
 - `docker-compose.yml`: runtime config
 - `sql/normalize_snowcam_prm.sql`: normalized schema + catalog metadata
 - `sql/add_camera.sql`: helper script to add/update resort/location/camera metadata
+- `sql/add_camera_crop_columns.sql`: adds per-camera crop columns + metadata
+- `sql/set_camera_crops.sql`: applies crop settings for existing cameras
+- `sql/add_camera_model_notes.sql`: adds per-camera prompt notes column + metadata
+- `sql/set_camera_model_notes.sql`: applies prompt notes for existing cameras
 - `.env.example`: environment template
 
 ## Setup
@@ -65,8 +69,30 @@ sqlcmd -S <server> -d ExampleDB -U <user> -P <password> ^
      CAMERA_CODE="EXM-CAM1" CAMERA_NAME="example_snowstake1" ^
      IMAGE_URL="https://example.com/cam-images/example_snowstake1.jpg" ^
      POLL_INTERVAL_MINUTES="30" ^
+     CROP_X="" CROP_Y="" CROP_W="" CROP_H="" ^
+     MODEL_NOTES="" ^
   -i sql\add_camera.sql
 ```
+
+## Camera Tuning Fields
+
+`dbo.dim_camera` supports per-camera image and prompt tuning:
+
+- `crop_x`, `crop_y`, `crop_w`, `crop_h`: optional crop rectangle in source-image pixels
+  - All four must be set together, or all null.
+- `model_notes`: optional camera-specific instructions appended to the global model prompt.
+
+These settings are useful for handling camera-specific quirks (fixed objects, logos, framing differences, etc.).
+
+## Snowfall Guardrails
+
+Additional guardrails are configurable in `.env`:
+
+- `SNOW_MIN_CONFIDENCE_FOR_VALID_DEPTH` (default `0.6`)
+- `SNOW_FORCE_UNREADABLE_ON_POOR_VISIBILITY` (default `true`)
+- `SNOW_MIN_CONFIDENCE_FOR_INCREMENT` (default `0.85`)
+- `SNOW_REQUIRE_GOOD_VISIBILITY_FOR_INCREMENT` (default `true`)
+- `SNOW_MAX_INCREMENT_IN` (default `3.0`)
 
 ## Windows Server (Docker + Task Scheduler)
 

@@ -20,6 +20,7 @@ from google import genai
 from google.auth.exceptions import DefaultCredentialsError
 from google.genai import types
 from PIL import Image
+from PIL import ImageStat
 
 
 @dataclass
@@ -183,6 +184,7 @@ def ensure_camera_paths(base_paths: Dict[str, Path], camera_code: str) -> Dict[s
     return {
         "history": camera_dir / "history.json",
         "last_image": camera_dir / "last_image.jpg",
+        "day_reference_image": camera_dir / "day_reference.jpg",
         "latest_report": camera_dir / "latest_report.json",
         "daily_summary_dir": daily_summary_dir,
     }
@@ -269,6 +271,8 @@ def build_prompt(camera_specific_notes: str = "") -> str:
         "- only snow touching/intersecting the stake at the measurement point counts\n"
         "- shadows, reflections, dark wet patches, logos, and painted graphics are not snow depth\n"
         "- if notes indicate clear base/no accumulation at stake, current_depth_in must be 0.0\n"
+        "- if a daytime reference image is provided, use it only to identify fixed objects/stake geometry\n"
+        "- measure depth from the current image only, not from the reference image\n"
         "- when uncertain, choose the lower depth estimate\n"
         "- be conservative when visibility is poor\n"
         "- notes must be concise and <= 180 characters\n"
@@ -314,6 +318,7 @@ def analyze_with_vertex(
     cfg: Config,
     current_image: bytes,
     previous_image: Optional[bytes],
+    reference_image: Optional[bytes] = None,
     camera_specific_notes: str = "",
     client: Optional[genai.Client] = None,
 ) -> Dict[str, Any]:
@@ -333,6 +338,14 @@ def analyze_with_vertex(
     if previous_image:
         parts.append(types.Part.from_text(text="Previous image (earlier in time):"))
         parts.append(types.Part.from_bytes(data=previous_image, mime_type="image/jpeg"))
+
+    if reference_image:
+        parts.append(
+            types.Part.from_text(
+                text="Daytime reference image of the same stake (context only; do not measure depth from this image):"
+            )
+        )
+        parts.append(types.Part.from_bytes(data=reference_image, mime_type="image/jpeg"))
 
     parts.append(types.Part.from_text(text="Current image (latest):"))
     parts.append(types.Part.from_bytes(data=current_image, mime_type="image/jpeg"))
@@ -684,6 +697,16 @@ def enforce_depth_quality_guardrails(cfg: Config, model_result: Dict[str, Any]) 
     return model_result
 
 
+def is_daylight_image(image_bytes: bytes) -> bool:
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            gray = img.convert("L")
+            mean_luma = float(ImageStat.Stat(gray).mean[0])
+            return mean_luma >= 85.0
+    except Exception:
+        return False
+
+
 def get_last_db_row(cfg: Config, camera_id: int) -> Optional[Dict[str, Any]]:
     with get_db_connection(cfg) as conn:
         cur = conn.cursor()
@@ -928,6 +951,11 @@ def run_once_camera(
     previous_image = (
         camera_paths["last_image"].read_bytes() if camera_paths["last_image"].exists() else None
     )
+    day_reference_image = (
+        camera_paths["day_reference_image"].read_bytes()
+        if camera_paths["day_reference_image"].exists()
+        else None
+    )
 
     model_result = with_retry(
         "vertex_analysis",
@@ -937,6 +965,7 @@ def run_once_camera(
             cfg,
             current_image,
             previous_image,
+            day_reference_image,
             camera_ctx.get("model_notes", ""),
             analysis_client,
         ),
@@ -985,6 +1014,13 @@ def run_once_camera(
     history.append(row)
     save_history(camera_paths["history"], history)
     camera_paths["last_image"].write_bytes(current_image)
+    if (
+        is_daylight_image(current_image)
+        and model_result["current_depth_in"] >= 0
+        and model_result["visibility"] in ("good", "fair")
+        and float(model_result["confidence"]) >= 0.8
+    ):
+        camera_paths["day_reference_image"].write_bytes(current_image)
 
     today_total = total_for_date(history, local_today.isoformat(), report_timezone)
     yesterday_total = total_for_date(history, local_yesterday.isoformat(), report_timezone)
