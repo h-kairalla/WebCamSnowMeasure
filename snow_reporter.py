@@ -32,6 +32,8 @@ class Config:
     timezone_name: str
     min_increment_in: float
     clear_drop_threshold_in: float
+    min_confidence_for_valid_depth: float
+    force_unreadable_on_poor_visibility: bool
     min_confidence_for_increment: float
     require_good_visibility_for_increment: bool
     max_increment_in: float
@@ -115,6 +117,11 @@ def load_config(args: argparse.Namespace) -> Config:
         timezone_name=os.getenv("RESORT_TIMEZONE", "America/Denver"),
         min_increment_in=float(os.getenv("SNOW_MIN_INCREMENT_IN", "0.1")),
         clear_drop_threshold_in=float(os.getenv("SNOW_CLEAR_DROP_IN", "2.0")),
+        min_confidence_for_valid_depth=float(os.getenv("SNOW_MIN_CONFIDENCE_FOR_VALID_DEPTH", "0.6")),
+        force_unreadable_on_poor_visibility=os.getenv(
+            "SNOW_FORCE_UNREADABLE_ON_POOR_VISIBILITY", "true"
+        ).lower()
+        == "true",
         min_confidence_for_increment=float(os.getenv("SNOW_MIN_CONFIDENCE_FOR_INCREMENT", "0.85")),
         require_good_visibility_for_increment=os.getenv(
             "SNOW_REQUIRE_GOOD_VISIBILITY_FOR_INCREMENT", "true"
@@ -238,8 +245,8 @@ def fetch_image(image_url: str, verify_tls: bool) -> bytes:
     return response.content
 
 
-def build_prompt() -> str:
-    return (
+def build_prompt(camera_specific_notes: str = "") -> str:
+    prompt = (
         "You are analyzing a fixed snow stake webcam for a ski resort.\n"
         "Estimate snow depth on the stake in inches.\n"
         "The scale labels on the stake are inches.\n"
@@ -266,6 +273,12 @@ def build_prompt() -> str:
         "- be conservative when visibility is poor\n"
         "- notes must be concise and <= 180 characters\n"
     )
+    if camera_specific_notes.strip():
+        prompt += (
+            "Camera-specific instructions:\n"
+            f"- {camera_specific_notes.strip()}\n"
+        )
+    return prompt
 
 
 def parse_model_json(raw_text: str) -> Dict[str, Any]:
@@ -301,6 +314,7 @@ def analyze_with_vertex(
     cfg: Config,
     current_image: bytes,
     previous_image: Optional[bytes],
+    camera_specific_notes: str = "",
     client: Optional[genai.Client] = None,
 ) -> Dict[str, Any]:
     if cfg.use_mock_analyzer:
@@ -314,7 +328,7 @@ def analyze_with_vertex(
     if client is None:
         client = build_genai_client(cfg)
 
-    parts = [types.Part.from_text(text=build_prompt())]
+    parts = [types.Part.from_text(text=build_prompt(camera_specific_notes))]
 
     if previous_image:
         parts.append(types.Part.from_text(text="Previous image (earlier in time):"))
@@ -489,12 +503,39 @@ def load_active_camera_contexts(cfg: Config) -> List[Dict[str, Any]]:
                 CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_x') IS NOT NULL THEN 1 ELSE 0 END,
                 CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_y') IS NOT NULL THEN 1 ELSE 0 END,
                 CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_w') IS NOT NULL THEN 1 ELSE 0 END,
-                CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_h') IS NOT NULL THEN 1 ELSE 0 END
+                CASE WHEN COL_LENGTH('dbo.dim_camera', 'crop_h') IS NOT NULL THEN 1 ELSE 0 END,
+                CASE WHEN COL_LENGTH('dbo.dim_camera', 'model_notes') IS NOT NULL THEN 1 ELSE 0 END
             """
         )
-        crop_columns_present = all(bool(v) for v in cur.fetchone())
+        info = cur.fetchone()
+        crop_columns_present = all(bool(v) for v in info[:4])
+        model_notes_present = bool(info[4])
 
-        if crop_columns_present:
+        if crop_columns_present and model_notes_present:
+            cur.execute(
+                """
+                SELECT
+                    c.camera_id,
+                    c.camera_name,
+                    c.camera_code,
+                    c.image_url,
+                    c.is_active,
+                    l.location_name,
+                    r.resort_name,
+                    r.timezone_name,
+                    c.crop_x,
+                    c.crop_y,
+                    c.crop_w,
+                    c.crop_h,
+                    c.model_notes
+                FROM dbo.dim_camera c
+                JOIN dbo.dim_location l ON c.location_id = l.location_id
+                JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+                WHERE c.is_active = 1
+                ORDER BY c.camera_id ASC
+                """
+            )
+        elif crop_columns_present:
             cur.execute(
                 """
                 SELECT
@@ -510,6 +551,26 @@ def load_active_camera_contexts(cfg: Config) -> List[Dict[str, Any]]:
                     c.crop_y,
                     c.crop_w,
                     c.crop_h
+                FROM dbo.dim_camera c
+                JOIN dbo.dim_location l ON c.location_id = l.location_id
+                JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+                WHERE c.is_active = 1
+                ORDER BY c.camera_id ASC
+                """
+            )
+        elif model_notes_present:
+            cur.execute(
+                """
+                SELECT
+                    c.camera_id,
+                    c.camera_name,
+                    c.camera_code,
+                    c.image_url,
+                    c.is_active,
+                    l.location_name,
+                    r.resort_name,
+                    r.timezone_name,
+                    c.model_notes
                 FROM dbo.dim_camera c
                 JOIN dbo.dim_location l ON c.location_id = l.location_id
                 JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
@@ -554,6 +615,13 @@ def load_active_camera_contexts(cfg: Config) -> List[Dict[str, Any]]:
                     "crop_y": int(row[9]) if crop_columns_present and row[9] is not None else None,
                     "crop_w": int(row[10]) if crop_columns_present and row[10] is not None else None,
                     "crop_h": int(row[11]) if crop_columns_present and row[11] is not None else None,
+                    "model_notes": str(row[12]).strip()
+                    if crop_columns_present and model_notes_present and row[12]
+                    else (
+                        str(row[8]).strip()
+                        if (not crop_columns_present and model_notes_present and row[8])
+                        else ""
+                    ),
                 }
             )
         return cameras
@@ -599,6 +667,21 @@ def maybe_crop_image_for_camera(
             exc,
         )
         return image_bytes
+
+
+def enforce_depth_quality_guardrails(cfg: Config, model_result: Dict[str, Any]) -> Dict[str, Any]:
+    visibility = str(model_result.get("visibility", "unknown")).lower()
+    confidence = float(model_result.get("confidence", 0.0))
+    if (
+        cfg.force_unreadable_on_poor_visibility
+        and visibility == "poor"
+        and confidence < cfg.min_confidence_for_valid_depth
+    ):
+        notes = str(model_result.get("notes", ""))
+        suffix = "Low-confidence poor-visibility frame treated as unreadable."
+        model_result["current_depth_in"] = -1.0
+        model_result["notes"] = f"{notes} {suffix}".strip()[:180]
+    return model_result
 
 
 def get_last_db_row(cfg: Config, camera_id: int) -> Optional[Dict[str, Any]]:
@@ -850,9 +933,16 @@ def run_once_camera(
         "vertex_analysis",
         cfg.vertex_retry_attempts,
         cfg.retry_delay_seconds,
-        lambda: analyze_with_vertex(cfg, current_image, previous_image, analysis_client),
+        lambda: analyze_with_vertex(
+            cfg,
+            current_image,
+            previous_image,
+            camera_ctx.get("model_notes", ""),
+            analysis_client,
+        ),
         logger,
     )
+    model_result = enforce_depth_quality_guardrails(cfg, model_result)
 
     metrics = compute_interval_snowfall(
         current_depth_in=model_result["current_depth_in"],

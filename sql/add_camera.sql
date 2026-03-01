@@ -10,6 +10,7 @@ sqlcmd -S <server> -d ExampleDB -U <user> -P <password> ^
      IMAGE_URL="https://example.com/cam-images/example_snowstake1.jpg" ^
      POLL_INTERVAL_MINUTES="30" ^
      CROP_X="" CROP_Y="" CROP_W="" CROP_H="" ^
+     MODEL_NOTES="" ^
   -i sql\add_camera.sql
 */
 
@@ -27,6 +28,7 @@ DECLARE @crop_x INT = TRY_CAST(NULLIF('$(CROP_X)', '') AS INT);
 DECLARE @crop_y INT = TRY_CAST(NULLIF('$(CROP_Y)', '') AS INT);
 DECLARE @crop_w INT = TRY_CAST(NULLIF('$(CROP_W)', '') AS INT);
 DECLARE @crop_h INT = TRY_CAST(NULLIF('$(CROP_H)', '') AS INT);
+DECLARE @model_notes NVARCHAR(1000) = NULLIF(N'$(MODEL_NOTES)', N'');
 
 IF @poll_interval_minutes IS NULL
     SET @poll_interval_minutes = 30;
@@ -93,6 +95,9 @@ DECLARE @has_crop_columns BIT = CASE
       AND COL_LENGTH('dbo.dim_camera', 'crop_y') IS NOT NULL
       AND COL_LENGTH('dbo.dim_camera', 'crop_w') IS NOT NULL
       AND COL_LENGTH('dbo.dim_camera', 'crop_h') IS NOT NULL
+    THEN 1 ELSE 0 END;
+DECLARE @has_model_notes_column BIT = CASE
+    WHEN COL_LENGTH('dbo.dim_camera', 'model_notes') IS NOT NULL
     THEN 1 ELSE 0 END;
 
 IF NOT EXISTS (SELECT 1 FROM dbo.dim_camera WHERE camera_code = @camera_code)
@@ -176,7 +181,14 @@ BEGIN
     END
 END;
 
-IF @has_crop_columns = 1
+IF @has_model_notes_column = 1
+BEGIN
+    UPDATE dbo.dim_camera
+    SET model_notes = @model_notes
+    WHERE camera_code = @camera_code;
+END
+
+IF @has_crop_columns = 1 AND @has_model_notes_column = 1
 BEGIN
     SELECT
         r.resort_code,
@@ -191,6 +203,46 @@ BEGIN
         c.crop_y,
         c.crop_w,
         c.crop_h,
+        c.model_notes,
+        c.is_active
+    FROM dbo.dim_camera c
+    JOIN dbo.dim_location l ON c.location_id = l.location_id
+    JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+    WHERE c.camera_code = @camera_code;
+END
+ELSE IF @has_crop_columns = 1
+BEGIN
+    SELECT
+        r.resort_code,
+        r.resort_name,
+        l.location_code,
+        l.location_name,
+        c.camera_code,
+        c.camera_name,
+        c.image_url,
+        c.poll_interval_minutes,
+        c.crop_x,
+        c.crop_y,
+        c.crop_w,
+        c.crop_h,
+        c.is_active
+    FROM dbo.dim_camera c
+    JOIN dbo.dim_location l ON c.location_id = l.location_id
+    JOIN dbo.dim_resort r ON l.resort_id = r.resort_id
+    WHERE c.camera_code = @camera_code;
+END
+ELSE IF @has_model_notes_column = 1
+BEGIN
+    SELECT
+        r.resort_code,
+        r.resort_name,
+        l.location_code,
+        l.location_name,
+        c.camera_code,
+        c.camera_name,
+        c.image_url,
+        c.poll_interval_minutes,
+        c.model_notes,
         c.is_active
     FROM dbo.dim_camera c
     JOIN dbo.dim_location l ON c.location_id = l.location_id
