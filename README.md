@@ -1,8 +1,25 @@
 # WebCam Snow Measure
 
-Snow stake reporting service using Vertex AI + SQL Server, designed to run in a Linux Docker container.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg?logo=docker&logoColor=white)](Dockerfile)
+[![Vertex AI](https://img.shields.io/badge/Vertex%20AI-Gemini-4285F4.svg?logo=googlecloud&logoColor=white)](https://cloud.google.com/vertex-ai)
+
+Snow stake reporting service using Vertex AI (Gemini) + SQL Server, designed to run in a Linux Docker container. Reads webcam images of physical snow stakes, asks Gemini to read the depth from the markings, and persists observations with change-or-heartbeat logic.
 
 Authored by Harrison Kairalla.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Webcam HTTPS<br/>JPEG] --> B[snow_reporter.py]
+    B -->|crop + pair prev/curr| C[Vertex AI<br/>Gemini Vision]
+    C -->|depth, confidence,<br/>visibility, notes| B
+    B -->|change or heartbeat| D[(SQL Server<br/>snowcam_observations)]
+    B -->|state| E[data/cameras/&lt;code&gt;/]
+    F[(dim_camera<br/>dim_location<br/>dim_resort)] --> B
+```
 
 ## What It Does
 
@@ -11,6 +28,22 @@ Authored by Harrison Kairalla.
 3. Calls Vertex AI for each camera image pair (previous + current).
 4. Writes observations to SQL Server with change-or-heartbeat logic.
 5. Stores per-camera local state under `data/cameras/<camera_code>/`.
+
+## Example Observation Row
+
+| column | value |
+|---|---|
+| `observation_utc` | `2026-02-14 11:00:03` |
+| `camera_id` | `7` |
+| `current_depth_in` | `18.5` |
+| `delta_in` | `0.7` |
+| `interval_snowfall_in` | `0.7` |
+| `today_snowfall_total_in` | `2.1` |
+| `stake_cleared` | `0` |
+| `confidence` | `0.92` |
+| `visibility` | `good` |
+| `run_status` | `ok` |
+| `notes` | `stake markings clear; snow surface continuous` |
 
 ## Core Files
 
