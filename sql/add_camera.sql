@@ -3,11 +3,11 @@ GO
 
 /*
 Usage example:
-sqlcmd -S <server> -d ExampleDB -U <user> -P <password> ^
+sqlcmd -S <server> -d <database> -U <user> -P <password> ^
   -v RESORT_CODE="EXM" RESORT_NAME="Example Resort" TIMEZONE_NAME="America/Denver" ^
      LOCATION_CODE="SNOWSTAKE1" LOCATION_NAME="Main Mountain Snow Stake" ELEVATION_FT="0" ^
      CAMERA_CODE="EXM-CAM1" CAMERA_NAME="example_snowstake1" ^
-     IMAGE_URL="https://example.com/cam-images/example_snowstake1.jpg" ^
+     IMAGE_URL="https://example.com/cam-images/snowstake1.jpg" ^
      POLL_INTERVAL_MINUTES="30" ^
      CROP_X="" CROP_Y="" CROP_W="" CROP_H="" ^
      MODEL_NOTES="" ^

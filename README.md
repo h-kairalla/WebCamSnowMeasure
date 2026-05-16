@@ -17,7 +17,7 @@ Authored by Harrison Kairalla.
 - `snow_reporter.py`: main app
 - `Dockerfile`: container image
 - `docker-compose.yml`: runtime config
-- `sql/normalize_snowcam_prm.sql`: normalized schema + catalog metadata
+- `sql/normalize_snowcam_example.sql`: normalized schema + catalog metadata
 - `sql/add_camera.sql`: helper script to add/update resort/location/camera metadata
 - `sql/add_camera_crop_columns.sql`: adds per-camera crop columns + metadata
 - `sql/set_camera_crops.sql`: applies crop settings for existing cameras
@@ -31,7 +31,7 @@ Authored by Harrison Kairalla.
 2. Apply SQL schema:
 
 ```powershell
-sqlcmd -S <server> -d ExampleDB -U <user> -P <password> -i sql\normalize_snowcam_prm.sql
+sqlcmd -S <server> -d <database> -U <user> -P <password> -i sql\normalize_snowcam_example.sql
 ```
 
 3. Build image:
@@ -63,11 +63,11 @@ GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/adc.json
 Use SQL metadata upsert and keep cameras active in `dbo.dim_camera`.
 
 ```powershell
-sqlcmd -S <server> -d ExampleDB -U <user> -P <password> ^
+sqlcmd -S <server> -d <database> -U <user> -P <password> ^
   -v RESORT_CODE="EXM" RESORT_NAME="Example Resort" TIMEZONE_NAME="America/Denver" ^
      LOCATION_CODE="SNOWSTAKE1" LOCATION_NAME="Main Mountain Snow Stake" ELEVATION_FT="0" ^
      CAMERA_CODE="EXM-CAM1" CAMERA_NAME="example_snowstake1" ^
-     IMAGE_URL="https://example.com/cam-images/example_snowstake1.jpg" ^
+     IMAGE_URL="https://example.com/cam-images/snowstake1.jpg" ^
      POLL_INTERVAL_MINUTES="30" ^
      CROP_X="" CROP_Y="" CROP_W="" CROP_H="" ^
      MODEL_NOTES="" ^

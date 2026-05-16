@@ -95,7 +95,7 @@ BEGIN
 END
 GO
 
-/* 2) Seed initial PRM dimension rows */
+/* 2) Seed initial example dimension rows */
 DECLARE @resort_id BIGINT;
 DECLARE @location_id BIGINT;
 

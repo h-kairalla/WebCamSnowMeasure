@@ -107,10 +107,7 @@ class FileLock:
 def load_config(args: argparse.Namespace) -> Config:
     data_dir = Path(args.data_dir).resolve()
     return Config(
-        image_url=os.getenv(
-            "SNOW_IMAGE_URL",
-            "https://example.com/cam-images/example_snowstake1.jpg",
-        ),
+        image_url=os.getenv("SNOW_IMAGE_URL", ""),
         project_id=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
         location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
         model=os.getenv("VERTEX_MODEL", "gemini-2.5-pro"),

@@ -7,7 +7,7 @@ Use this file in future sessions to avoid re-discovery work.
 ## Environment
 - Project path (server): `C:\WebCamSnowMeasure`
 - Runtime: Docker Compose service `snowcam-reporter`
-- Primary DB: `ExampleDB` on `db-host` (from `.env`)
+- Primary DB: configured via `.env` (`DB_DATABASE`, `DB_SERVER`)
 
 ## Core Commands
 - Pull latest:
